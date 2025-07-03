@@ -1,7 +1,22 @@
+!pip install beautifulsoup4
+!pip install pdfminer.six
+!pip install lxml
+!pip install spacy
+!python -m spacy download en_core_web_sm
+!pip install pdfminer.six
+!pip install python-docx
+!pip install pandas
+!pip install openpyxl
+!pip install mail-parser
+!pip install stix2
+
+
+
 import os as o
 import re
 import spacy as sp
 import json as js
+import csv
 import pandas as pd
 import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup as bs
@@ -12,15 +27,13 @@ from docx import Document
 import mailparser
 from stix2 import parse as parse_stix
 from datetime import datetime
-from collections import OrderedDict
 
-# Load spaCy model
 nlp = sp.load("en_core_web_sm")
 
 filepath = input('Enter the file path: ')
 ext = o.path.splitext(filepath)[1].lower()
 
-# ========= TEXT EXTRACTION ==========
+# ========== TEXT EXTRACTION ==========
 def extract_text_from_file(filepath):
     try:
         if ext == '.pdf':
@@ -53,20 +66,24 @@ def extract_text_from_file(filepath):
                 data = js.load(f)
                 return js.dumps(data, indent=2)
 
-        elif ext in ['.xml', '.ioc']:
+        elif ext == '.xml':
             tree = ET.parse(filepath)
             root = tree.getroot()
             return ET.tostring(root, encoding='unicode')
 
-        elif ext in ['.stix', '.stix2']:
+        elif ext == '.ioc':  # OpenIOC file
+            tree = ET.parse(filepath)
+            root = tree.getroot()
+            return ET.tostring(root, encoding='unicode')
+
+        elif ext in ['.stix', '.stix2']:  # STIX 2.x JSON format
             with open(filepath, 'r', encoding='utf-8') as f:
                 stix_obj = parse_stix(f.read())
                 return js.dumps(stix_obj.serialize(), indent=2)
 
         elif ext == '.eml':
             email = mailparser.parse_from_file(filepath)
-            headers = '\n'.join(f"{k}: {v}" for k, v in email.headers.items())
-            return email.body + '\n' + headers
+            return email.body + '\n' + '\n'.join(email.headers.items())
 
         else:
             print(f"[!] Unsupported File Type: {ext}")
@@ -76,18 +93,18 @@ def extract_text_from_file(filepath):
         print(f"[!] Error reading {filepath}: {e}")
         return ''
 
-# ========= GET TEXT ==========
+# ========== GET RAW TEXT ==========
 fp = extract_text_from_file(filepath)
 if not fp:
     print("[!] No data extracted. Exiting...")
     exit()
 
-# ========= TEXT CLEANUP ==========
-fp = re.sub(r'\n+', ' ', fp)
-fp = re.sub(r'\s{2,}', ' ', fp)
-fp = re.sub(r'(?<=\b\w)\s(?=\w\b)', '', fp)
+# ========== TEXT CLEANUP (Safe Version) ==========
+fp = re.sub(r'\n+', ' ', fp)                    # merge multiple newlines into space
+fp = re.sub(r'\s{2,}', ' ', fp)                 # normalize multiple spaces
+fp = re.sub(r'(?<=\b\w)\s(?=\w\b)', '', fp)  # fix broken single-character spacing (e.g., D I A → DIA)
 
-# ========= REGEX IOCs ==========
+# ========== REGEX IOCs ==========
 try:
     raw_ips = re.findall(r'\b\d{1,3}(?:\.|\[\.\])\d{1,3}(?:\.|\[\.\])\d{1,3}(?:\.|\[\.\])\d{1,3}\b', fp)
 except Exception as e:
@@ -104,7 +121,7 @@ extract1 = {
     'attack_id': re.findall(r'T\d{4}(?:\.\d{3})?', fp)
 }
 
-# ========= NLP ENTITIES ==========
+# ========== NLP Named Entities ==========
 doc = nlp(fp)
 seen_entities = set()
 extract2 = []
@@ -112,18 +129,14 @@ for ent in doc.ents:
     key = (ent.text, ent.label_)
     if key not in seen_entities:
         seen_entities.add(key)
-        extract2.append({
-            "text": ent.text,
-            "label": ent.label_,
-            "start": ent.start_char,
-            "end": ent.end_char
-        })
+        extract2.append({"text": ent.text, "label": ent.label_, "start": ent.start_char, "end": ent.end_char})
 
+from collections import OrderedDict
 threat_actors = list(OrderedDict.fromkeys(
     ent.text for ent in doc.ents if ent.label_ in ["ORG", "PERSON", "PRODUCT"]
 ))
 
-# ========= HTML METADATA ==========
+# ========== HTML Metadata ==========
 extract3 = {}
 if ext in ['.html', '.htm']:
     try:
@@ -138,7 +151,7 @@ if ext in ['.html', '.htm']:
     except Exception as e:
         print("[!] Error extracting HTML metadata:", e)
 
-# ========= PDF METADATA ==========
+# ========== PDF Metadata ==========
 extract4 = {}
 if ext == '.pdf':
     try:
@@ -155,9 +168,9 @@ if ext == '.pdf':
     except Exception as e:
         print("[!] PDF metadata extraction failed:", e)
 
-# ========= NORMALIZED VECTOR ==========
+# ========== NORMALIZED STRUCTURE ==========
 def normalize_output(extract1, extract2):
-    return {
+    normalized = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "hashes": extract1["md5"] + extract1["sha1"] + extract1["sha256"],
         "ips": extract1["ipv4"] + extract1["ipv6"],
@@ -165,10 +178,11 @@ def normalize_output(extract1, extract2):
         "ttp_ids": extract1["attack_id"],
         "confidence": 90
     }
+    return normalized
 
 normalized_output = normalize_output(extract1, extract2)
 
-# ========= FINAL OUTPUT ==========
+# ========== FINAL OUTPUT ==========
 final_output = {
     'regex_iocs': extract1,
     'nlp_entities': extract2,
@@ -184,7 +198,6 @@ try:
     with open(out_name, 'w', encoding='utf-8') as f:
         js.dump(final_output, f, indent=4)
     print(f"[✓] Output saved to {out_name}")
-    #print(js.dumps(final_output, indent=2))
+    print(js.dumps(final_output, indent=2))
 except Exception as e:
     print("[!] Failed to save JSON:", e)
-
